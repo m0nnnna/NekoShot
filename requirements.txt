@@ -1,0 +1,18 @@
+# NekoShot - Python Dependencies
+# This tool uses Python standard library only.
+# No external Python packages required.
+
+# System Dependencies (install via package manager):
+# - rsync: Required for filesystem capture/restore
+# - zstd: Recommended for fast compression (optional, falls back to gzip)
+# - tar: Required for archive creation
+# - Docker: Required for Docker backup/restore (if using Docker features)
+
+# Ubuntu/Debian:
+#   sudo apt install rsync zstd
+
+# Alpine:
+#   apk add rsync zstd
+
+# Fedora/RHEL:
+#   sudo dnf install rsync zstd
