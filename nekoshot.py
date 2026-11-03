@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
 
+from utils.crypto import resolve_passphrase_file, check_passphrase_file, encrypt_file, PASSPHRASE_ENV
 from config import load_config, NekoShotConfig, CaptureConfig, RestoreConfig, apply_profile, PROFILES
 from utils.logging import setup_logging, get_logger
 from utils.compression import compress_directory, decompress_archive, create_checksum, verify_checksum
@@ -73,7 +74,7 @@ NEKO_SQL_BANNER = r"""
     > ~ <
 """
 
-ARCHIVE_EXTENSIONS = ('.tar.zst', '.tar.gz', '.tar')
+ARCHIVE_EXTENSIONS = ('.tar.zst.gpg', '.tar.gz.gpg', '.tar.gpg', '.tar.zst', '.tar.gz', '.tar')
 
 # Banners are charm for humans and noise for parsers - under --json they would
 # sit in front of the payload and stop `nekoshot status --json | jq` working
@@ -226,7 +227,7 @@ def _snapshot_mode(image_dir: Path) -> str:
     return 'full'
 
 
-def _extract_to_temp(archive_path: Path, logger, tracker: Optional[PhaseTracker] = None) -> Path:
+def _extract_to_temp(archive_path: Path, logger, tracker: Optional[PhaseTracker] = None, passphrase_file: Optional[Path] = None) -> Path:
     """Extract a snapshot archive to a temp directory for restore.
 
     Extracts next to the archive file itself to avoid /tmp tmpfs limits
@@ -238,7 +239,7 @@ def _extract_to_temp(archive_path: Path, logger, tracker: Optional[PhaseTracker]
     extract_dir.mkdir(parents=True)
 
     logger.info(f'Unpacking snapshot archive to {extract_dir}...')
-    decompress_archive(archive_path, extract_dir, strip_components=1, tracker=tracker)
+    decompress_archive(archive_path, extract_dir, strip_components=1, tracker=tracker, passphrase_file=passphrase_file)
     return extract_dir
 
 
@@ -256,6 +257,19 @@ def cmd_capture(args, config: NekoShotConfig):
 
     if args.no_docker:
         capture_config.include_docker = False
+
+    if getattr(args, 'encrypt', False):
+        capture_config.encrypt = True
+    if getattr(args, 'passphrase_file', None):
+        capture_config.passphrase_file = args.passphrase_file
+    passphrase_file = None
+    if capture_config.encrypt:
+        passphrase_file = resolve_passphrase_file(capture_config.passphrase_file)
+        try:
+            check_passphrase_file(passphrase_file)
+        except RuntimeError as e:
+            logger.error(f'Nyaa~! {e}')
+            return 1
 
     if getattr(args, 'prune_images', None):
         capture_config.prune_images = args.prune_images
@@ -338,7 +352,7 @@ def cmd_capture(args, config: NekoShotConfig):
         return 1
 
     # Phases: [system files] + [images, volumes, compose] + metadata, archive, checksum
-    phases = 3
+    phases = 3 + (1 if capture_config.encrypt else 0)
     if not docker_only:
         phases += 1
     if docker_available:
@@ -400,6 +414,12 @@ def cmd_capture(args, config: NekoShotConfig):
             level=capture_config.compression_level,
             tracker=tracker
         )
+
+        # Step 4b: Encrypt the archive; the checksum then covers the encrypted file
+        if capture_config.encrypt:
+            enc_bar = tracker.phase('Encrypting archive', unit='count')
+            archive_path = encrypt_file(archive_path, passphrase_file)
+            enc_bar.finish(summary='AES256')
 
         # Step 5: Create checksum sidecar
         checksum = create_checksum(archive_path, tracker=tracker)
@@ -488,7 +508,15 @@ def cmd_restore(args, config: NekoShotConfig):
     # If it's an archive file, extract to temp dir first
     extract_dir = None
     if _is_archive_file(image_path):
-        extract_dir = _extract_to_temp(image_path, logger, tracker=tracker)
+        pf = None
+        if image_path.name.endswith('.gpg'):
+            pf = resolve_passphrase_file(getattr(args, 'passphrase_file', None))
+            try:
+                check_passphrase_file(pf)
+            except RuntimeError as e:
+                logger.error(f'Nyaa~! {e}')
+                return 1
+        extract_dir = _extract_to_temp(image_path, logger, tracker=tracker, passphrase_file=pf)
         image_dir = extract_dir
     else:
         image_dir = image_path
@@ -1516,6 +1544,10 @@ Examples:
     capture_parser.add_argument('--profile', choices=list(PROFILES),
                                 help="'desktop': whole PC incl. /boot/efi and separate /home, skips Docker, "
                                      "Steam game files and caches. 'server' (default): one filesystem, Docker included")
+    capture_parser.add_argument('--encrypt', action='store_true',
+                                help='Encrypt the snapshot (gpg AES256) with the passphrase in --passphrase-file')
+    capture_parser.add_argument('--passphrase-file',
+                                help=f'Root-only file holding the passphrase (or set ${PASSPHRASE_ENV})')
     capture_parser.add_argument('--pause-docker', action='store_true', help='Pause Docker containers during capture')
     capture_parser.add_argument('--no-docker', action='store_true', help='Skip Docker capture')
     capture_parser.add_argument('--docker-only', action='store_true',
@@ -1535,6 +1567,7 @@ Examples:
 
     restore_parser = subparsers.add_parser('restore', parents=[common], help='Restore system from snapshot (live restore by default)')
     restore_parser.add_argument('--image', '-i', required=True, help='Path to snapshot archive (.tar.zst) or legacy image directory')
+    restore_parser.add_argument('--passphrase-file', help='Passphrase file for an encrypted snapshot')
     restore_parser.add_argument('--target', '-t', help='Chroot restore to mounted target (e.g., /mnt/restore). Without this, restores to live system')
     restore_parser.add_argument('--fix-bootloader', help='Device to install bootloader (e.g., /dev/sda) [chroot mode only]')
     restore_parser.add_argument('--bootloader-type', choices=['grub', 'syslinux'], help='Bootloader type [chroot mode only]')

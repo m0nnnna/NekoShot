@@ -77,6 +77,9 @@ class CaptureConfig:
     # 'server' keeps rsync on one filesystem (the historic behaviour). 'desktop' crosses
     # filesystems so /boot/efi and a separate /home are captured, and drops Docker.
     profile: str = 'server'
+    # Encrypt the finished archive (gpg, AES256) with the passphrase in this root-only file.
+    encrypt: bool = False
+    passphrase_file: str = ''
     one_file_system: bool = True
     include_docker: bool = True
     docker_only: bool = False

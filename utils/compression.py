@@ -162,7 +162,8 @@ def decompress_archive(
     archive_path: Path,
     output_dir: Path,
     strip_components: int = 0,
-    tracker: Optional[PhaseTracker] = None
+    tracker: Optional[PhaseTracker] = None,
+    passphrase_file: Optional[Path] = None
 ) -> Path:
     """
     Decompress a tar archive to the specified directory.
@@ -188,6 +189,44 @@ def decompress_archive(
     bar = tracker.phase(f'Unpacking {archive_path.name}', total=archive_size) if tracker else None
 
     archive_str = str(archive_path)
+
+    if archive_str.endswith('.gpg'):
+        # gpg -d | (zstd -d | gzip -d | cat) | tar -x, streamed so no decrypted copy hits the disk
+        from utils.crypto import decrypt_command, inner_name
+        inner = inner_name(archive_str)
+        if inner.endswith('.tar.zst'):
+            middle = ['zstd', '-d', '-c']
+        elif inner.endswith('.tar.gz'):
+            middle = ['gzip', '-d', '-c']
+        else:
+            middle = ['cat']
+        tar_cmd = ['tar', '-xf', '-', '-C', str(output_dir)]
+        if strip_components > 0:
+            tar_cmd.extend(['--strip-components', str(strip_components)])
+        logger.info(f'Decrypting and unpacking {archive_path} ({format_bytes(archive_size)}) to {output_dir}')
+        gpg_proc = subprocess.Popen(decrypt_command(archive_path, passphrase_file),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        mid_proc = subprocess.Popen(middle, stdin=gpg_proc.stdout, stdout=subprocess.PIPE)
+        gpg_proc.stdout.close()
+        tar_proc = subprocess.Popen(tar_cmd, stdin=mid_proc.stdout)
+        mid_proc.stdout.close()
+        if bar:
+            with poll_read_offset(bar, gpg_proc.pid, archive_path):
+                tar_proc.wait()
+        else:
+            tar_proc.wait()
+        mid_proc.wait()
+        gpg_proc.wait()
+        if gpg_proc.returncode != 0 or mid_proc.returncode != 0 or tar_proc.returncode != 0:
+            if bar:
+                bar.abandon()
+            err = gpg_proc.stderr.read().decode().strip() if gpg_proc.stderr else ''
+            raise RuntimeError(f'Decrypt/unpack failed (gpg={gpg_proc.returncode}, tar={tar_proc.returncode}). '
+                               f'Wrong passphrase? {err}')
+        if bar:
+            bar.finish(summary=format_bytes(archive_size))
+        return output_dir
+
     if archive_str.endswith('.tar.zst') or archive_str.endswith('.zst'):
         if not check_zstd_available():
             if bar:
