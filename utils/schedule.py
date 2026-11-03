@@ -33,6 +33,115 @@ SCHEDULE_PRESETS = {
 }
 
 
+# systemd timers: the backend on hosts with systemd and no cron. Ubuntu Desktop does not
+# install cron, so cron entries written there would look scheduled and never fire.
+SYSTEMD_DIR = Path('/etc/systemd/system')
+UNIT_PREFIX = 'nekoshot-'
+_DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+
+def uses_systemd_timers() -> bool:
+    """True on a systemd host with no cron to run entries."""
+    return (Path('/run/systemd/system').is_dir()
+            and not shutil.which('cron') and not shutil.which('crond'))
+
+
+def cron_to_oncalendar(expr: str) -> str:
+    """
+    Translate a 5-field cron expression into a systemd OnCalendar value.
+
+    Supports numbers, lists, ranges and steps in each field. A job restricted by both
+    day-of-month and day-of-week is rejected: cron ORs them, systemd ANDs them.
+    """
+    fields = expr.split()
+    if len(fields) != 5:
+        raise ValueError(f'expected 5 cron fields, got {len(fields)}: {expr!r}')
+    minute, hour, dom, mon, dow = fields
+    if dom != '*' and dow != '*':
+        raise ValueError('restricting both day-of-month and day-of-week is not supported')
+    ok = re.compile(r'^[0-9*/,-]+$')
+    if not all(ok.match(f) for f in fields):
+        raise ValueError(f'unsupported cron syntax: {expr!r}')
+
+    def conv(field: str) -> str:
+        # systemd spells "every N" as 0/N, not */N
+        return re.sub(r'(^|,)\*/', r'\g<1>0/', field).replace('-', '..')
+
+    dow_part = ''
+    if dow != '*':
+        def day(tok: str) -> str:
+            return _DOW[int(tok)]
+        pieces = []
+        for item in dow.split(','):
+            if '-' in item:
+                a, b = item.split('-')
+                pieces.append(f'{day(a)}..{day(b)}')
+            else:
+                pieces.append(day(item))
+        dow_part = ','.join(pieces) + ' '
+    return f'{dow_part}*-{conv(mon)}-{conv(dom)} {conv(hour)}:{conv(minute)}:00'
+
+
+def _unit_name(name: str) -> str:
+    safe = re.sub(r'[^A-Za-z0-9_.-]', '-', name)
+    return f'{UNIT_PREFIX}{safe}'
+
+
+def _systemctl(*args: str) -> None:
+    try:
+        subprocess.run(['systemctl', *args], capture_output=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _timer_add(name: str, schedule: str, command: str) -> Path:
+    unit = _unit_name(name)
+    on_calendar = cron_to_oncalendar(schedule)
+    SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
+    (SYSTEMD_DIR / f'{unit}.service').write_text(
+        f'[Unit]\nDescription=NekoShot backup: {name}\n\n'
+        f'[Service]\nType=oneshot\nNice=10\nIOSchedulingClass=idle\n'
+        f'# nekoshot-name: {name}\n# nekoshot-command: {command}\n'
+        f'ExecStart={command}\n')
+    (SYSTEMD_DIR / f'{unit}.timer').write_text(
+        f'[Unit]\nDescription=NekoShot schedule: {name}\n\n'
+        f'[Timer]\nOnCalendar={on_calendar}\nPersistent=true\n'
+        f'# nekoshot-cron: {schedule}\n\n[Install]\nWantedBy=timers.target\n')
+    _systemctl('daemon-reload')
+    _systemctl('enable', '--now', f'{unit}.timer')
+    logger.info(f'Scheduled "{name}" as {unit}.timer ({on_calendar})')
+    return SYSTEMD_DIR / f'{unit}.timer'
+
+
+def _timer_remove(name: str) -> bool:
+    unit = _unit_name(name)
+    timer, service = SYSTEMD_DIR / f'{unit}.timer', SYSTEMD_DIR / f'{unit}.service'
+    if not timer.exists() and not service.exists():
+        return False
+    _systemctl('disable', '--now', f'{unit}.timer')
+    timer.unlink(missing_ok=True)
+    service.unlink(missing_ok=True)
+    _systemctl('daemon-reload')
+    return True
+
+
+def _timer_list() -> List[Dict[str, str]]:
+    jobs = []
+    for timer in sorted(SYSTEMD_DIR.glob(f'{UNIT_PREFIX}*.timer')):
+        service = timer.with_suffix('.service')
+        if not service.exists():
+            continue
+        meta = {}
+        for line in timer.read_text().splitlines() + service.read_text().splitlines():
+            for key in ('name', 'command', 'cron'):
+                tag = f'# nekoshot-{key}: '
+                if line.startswith(tag):
+                    meta[key] = line[len(tag):]
+        if 'name' in meta and 'command' in meta:
+            jobs.append({'name': meta['name'], 'schedule': meta.get('cron', ''), 'command': meta['command']})
+    return jobs
+
+
 def uses_cron_d() -> bool:
     """
     Whether this host takes /etc/cron.d drop-ins.
@@ -55,6 +164,8 @@ def _is_busybox_cron() -> bool:
 
 
 def cron_file() -> Path:
+    if uses_systemd_timers():
+        return SYSTEMD_DIR
     return CRON_D_PATH if uses_cron_d() else BUSYBOX_CRONTAB
 
 
@@ -76,6 +187,8 @@ def _read_lines(path: Path) -> List[str]:
 
 def list_jobs() -> List[Dict[str, str]]:
     """Every NekoShot job currently installed."""
+    if uses_systemd_timers():
+        return _timer_list()
     lines = _read_lines(cron_file())
     jobs = []
 
@@ -117,6 +230,8 @@ def add_job(name: str, schedule: str, command: str) -> Path:
 
     Replacing by name keeps re-running the menu from stacking duplicate entries.
     """
+    if uses_systemd_timers():
+        return _timer_add(name, schedule, command)
     path = cron_file()
     remove_job(name, quiet=True)
 
@@ -146,6 +261,8 @@ def add_job(name: str, schedule: str, command: str) -> Path:
 
 def remove_job(name: str, quiet: bool = False) -> bool:
     """Remove a job by name. Returns whether anything was removed."""
+    if uses_systemd_timers():
+        return _timer_remove(name)
     path = cron_file()
     lines = _read_lines(path)
     if not lines:
@@ -195,7 +312,9 @@ def _reload_cron() -> None:
 
 
 def cron_running() -> bool:
-    """Whether a cron daemon is actually running to execute these jobs."""
+    """Whether something is actually running to execute these jobs."""
+    if uses_systemd_timers():
+        return True  # systemd itself fires the timers
     for name in ('crond', 'cron'):
         try:
             if subprocess.run(['pgrep', '-x', name], capture_output=True, timeout=5).returncode == 0:
