@@ -23,6 +23,30 @@ DEFAULT_EXCLUDES = [
     '/home/*/.cache/*',
 ]
 
+# Added on top of DEFAULT_EXCLUDES by the 'desktop' profile: a whole-system backup of a
+# desktop PC. Games and package caches are big and can be downloaded again; snap and
+# flatpak runtime mounts are loop mounts that must not be walked now that the
+# profile crosses filesystem boundaries to pick up /boot/efi and a separate /home.
+DESKTOP_EXCLUDES = [
+    '/snap/*',
+    '/var/lib/snapd/snaps/*',
+    '/var/lib/flatpak/repo/*',
+    '/var/lib/docker/*',
+    '/swapfile',
+    '/swap.img',
+    '/home/*/.local/share/Steam/steamapps/common/*',
+    '/home/*/.local/share/Steam/steamapps/shadercache/*',
+    '/home/*/.local/share/Steam/steamapps/compatdata/*/pfx/drive_c/windows/*',
+    '/home/*/.steam/steam/steamapps/common/*',
+    '/home/*/.local/share/Trash/*',
+    '/home/*/.var/app/*/cache/*',
+    '/home/*/.local/share/flatpak/repo/*',
+    '/home/*/.npm/_cacache/*',
+    '/home/*/.cargo/registry/*',
+]
+
+PROFILES = ('server', 'desktop')
+
 DOCKER_COMPOSE_LOCATIONS = [
     '/opt',
     '/home',
@@ -50,6 +74,10 @@ class CaptureConfig:
     compression: str = 'zstd'
     compression_level: int = 3
     exclude_patterns: List[str] = field(default_factory=lambda: DEFAULT_EXCLUDES.copy())
+    # 'server' keeps rsync on one filesystem (the historic behaviour). 'desktop' crosses
+    # filesystems so /boot/efi and a separate /home are captured, and drops Docker.
+    profile: str = 'server'
+    one_file_system: bool = True
     include_docker: bool = True
     docker_only: bool = False
     pause_docker: bool = False
@@ -233,6 +261,19 @@ def save_config(config: NekoShotConfig, path: Path) -> None:
 
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
+
+
+def apply_profile(capture: CaptureConfig, profile: str) -> None:
+    """Apply a named capture profile to the capture config, in place."""
+    if profile not in PROFILES:
+        raise ValueError(f'unknown profile {profile!r}, expected one of {", ".join(PROFILES)}')
+    capture.profile = profile
+    if profile == 'desktop':
+        capture.one_file_system = False
+        capture.include_docker = False
+        for pattern in DESKTOP_EXCLUDES:
+            if pattern not in capture.exclude_patterns:
+                capture.exclude_patterns.append(pattern)
 
 
 def get_default_excludes() -> List[str]:

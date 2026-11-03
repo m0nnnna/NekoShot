@@ -106,10 +106,12 @@ class SystemCapture:
         """Execute rsync with the given parameters."""
         cmd = [
             'rsync',
-            '-aAXHx',
+            '-aAXH',
             '--info=progress2',
             '--numeric-ids',
         ]
+        if self.config.one_file_system:
+            cmd.append('-x')
 
         for pattern in excludes:
             cmd.extend(['--exclude', pattern])

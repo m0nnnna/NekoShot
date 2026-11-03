@@ -138,6 +138,20 @@ class MetadataCapture:
         )
         partitions['fdisk'] = fdisk_result.stdout
 
+        # Machine-readable partition tables, one per physical disk. `sfdisk /dev/X < file`
+        # recreates the table (GPT/MBR, sizes, type GUIDs, PARTUUIDs) on a blank disk.
+        tables = {}
+        disks = subprocess.run(['lsblk', '-dn', '-o', 'NAME,TYPE'], capture_output=True, text=True)
+        for line in disks.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == 'disk':
+                dump = subprocess.run(['sfdisk', '-d', f'/dev/{parts[0]}'], capture_output=True, text=True)
+                if dump.returncode == 0 and dump.stdout.strip():
+                    (metadata_dir / f'sfdisk-{parts[0]}.dump').write_text(dump.stdout)
+                    tables[parts[0]] = f'sfdisk-{parts[0]}.dump'
+        partitions['sfdisk'] = tables
+        partitions['efi'] = Path('/sys/firmware/efi').exists()
+
         partitions_file = metadata_dir / 'partitions.json'
         with open(partitions_file, 'w') as f:
             json.dump(partitions, f, indent=2)

@@ -17,7 +17,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
 
-from config import load_config, NekoShotConfig, CaptureConfig, RestoreConfig
+from config import load_config, NekoShotConfig, CaptureConfig, RestoreConfig, apply_profile, PROFILES
 from utils.logging import setup_logging, get_logger
 from utils.compression import compress_directory, decompress_archive, create_checksum, verify_checksum
 from utils import progress
@@ -250,6 +250,9 @@ def cmd_capture(args, config: NekoShotConfig):
     capture_config.compression = args.compression or capture_config.compression
     capture_config.pause_docker = args.pause_docker or capture_config.pause_docker
     capture_config.docker_only = args.docker_only or capture_config.docker_only
+
+    if getattr(args, 'profile', None) or capture_config.profile != 'server':
+        apply_profile(capture_config, getattr(args, 'profile', None) or capture_config.profile)
 
     if args.no_docker:
         capture_config.include_docker = False
@@ -1510,6 +1513,9 @@ Examples:
     capture_parser.add_argument('--output', '-o', help='Output directory for the snapshot')
     capture_parser.add_argument('--compression', choices=['zstd', 'gzip', 'none'], help='Compression type')
     capture_parser.add_argument('--exclude', '-e', action='append', help='Additional patterns to exclude')
+    capture_parser.add_argument('--profile', choices=list(PROFILES),
+                                help="'desktop': whole PC incl. /boot/efi and separate /home, skips Docker, "
+                                     "Steam game files and caches. 'server' (default): one filesystem, Docker included")
     capture_parser.add_argument('--pause-docker', action='store_true', help='Pause Docker containers during capture')
     capture_parser.add_argument('--no-docker', action='store_true', help='Skip Docker capture')
     capture_parser.add_argument('--docker-only', action='store_true',
