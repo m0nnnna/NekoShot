@@ -1258,6 +1258,7 @@ def cmd_list(args, config: NekoShotConfig):
                 'created': created,
                 'hostname': hostname,
                 'mode': mode,
+                'encrypted': item.name.endswith('.gpg'),
                 'distro': '-',
                 'size_bytes': size,
                 'size_human': f'{size / 1024 / 1024:.1f} MB',
@@ -1281,6 +1282,7 @@ def cmd_list(args, config: NekoShotConfig):
                 'created': manifest.get('created', 'unknown'),
                 'hostname': manifest.get('hostname', ''),
                 'mode': _snapshot_mode(item),
+                'encrypted': False,
                 'distro': manifest.get('distro', 'unknown'),
                 'size_bytes': size,
                 'size_human': f'{size / 1024 / 1024:.1f} MB',
@@ -1345,10 +1347,14 @@ def cmd_verify(args, config: NekoShotConfig):
         if verify_checksum(image_path, expected_hash):
             logger.info('All checksums match - snapshot is purrfect!')
             if args.json:
-                print(json.dumps({'status': 'success', 'verified': True}))
+                print(json.dumps({'schema': 1, 'status': 'success', 'verified': True,
+                                  'image': str(image_path), 'encrypted': image_path.name.endswith('.gpg')}))
             return 0
         else:
             logger.error('FAILED - checksum mismatch!')
+            if args.json:
+                print(json.dumps({'schema': 1, 'status': 'failed', 'verified': False,
+                                  'image': str(image_path), 'error': 'checksum mismatch'}))
             return 1
 
     # Legacy format: directory with checksums.sha256 inside
@@ -1399,7 +1405,8 @@ def cmd_verify(args, config: NekoShotConfig):
     logger.info('\nAll checksums match - snapshot is purrfect!')
 
     if args.json:
-        print(json.dumps({'status': 'success', 'verified': True}))
+        print(json.dumps({'schema': 1, 'status': 'success', 'verified': True,
+                          'image': str(image_path), 'encrypted': False}))
 
     return 0
 
