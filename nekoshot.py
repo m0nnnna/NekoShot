@@ -11,6 +11,7 @@ import argparse
 import sys
 import os
 import json
+import shlex
 import shutil
 import time
 from pathlib import Path
@@ -292,6 +293,9 @@ def cmd_capture(args, config: NekoShotConfig):
     output_dir = Path(args.output or config.location_for('docker' if docker_only else 'system')).resolve()
     capture_config.output_dir = str(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # A full-system backup holds /etc and every home: only root may look inside,
+    # whatever umask the daemon was started with.
+    os.chmod(output_dir, 0o700)
 
     # Detach only once the arguments are known good, so mistakes are still
     # reported to the terminal rather than buried in a log nobody is watching
@@ -1099,7 +1103,9 @@ def cmd_schedule(args, config: NekoShotConfig) -> int:
         if not argv:
             print('Nyaa~! Need a nekoshot command to schedule, e.g.: capture --output /backup')
             return 1
-        command = f'{schedule.nekoshot_command()} {" ".join(argv)}'
+        # The command is stored in a crontab (run by sh) and in systemd ExecStart (its own
+        # parser): quote every argument so paths with spaces survive either.
+        command = f'{schedule.nekoshot_command()} {" ".join(shlex.quote(a) for a in argv)}'
         try:
             schedule.add_job(args.name, args.cron, command)
         except OSError as e:
@@ -1145,7 +1151,9 @@ def cmd_menu(args, config: NekoShotConfig, parser) -> int:
 
     if action == menu.ACTION_SCHEDULE:
         name, expression, *argv = payload
-        command = f'{schedule.nekoshot_command()} {" ".join(argv)}'
+        # The command is stored in a crontab (run by sh) and in systemd ExecStart (its own
+        # parser): quote every argument so paths with spaces survive either.
+        command = f'{schedule.nekoshot_command()} {" ".join(shlex.quote(a) for a in argv)}'
 
         print()
         print(f'  Installing into {schedule.cron_file()}:')
